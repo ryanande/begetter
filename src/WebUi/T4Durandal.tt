@@ -1,0 +1,1092 @@
+﻿<#@ template language="C#" debug="true" hostspecific="true" #>
+<#@ assembly name="System.Core" #>
+<#@ assembly name="Microsoft.VisualStudio.Shell.Interop" #>
+<#@ assembly name="EnvDTE" #>
+<#@ assembly name="EnvDTE80" #>
+<#@ assembly name="VSLangProj" #>
+<#@ assembly name="System.Xml" #>
+<#@ assembly name="System.Xml.Linq" #>
+<#@ import namespace="System.Collections.Generic" #>
+<#@ import namespace="System.IO" #>
+<#@ import namespace="System.Linq" #>
+<#@ import namespace="System.Text" #>
+<#@ import namespace="System.Text.RegularExpressions" #>
+<#@ import namespace="Microsoft.VisualStudio.Shell.Interop" #>
+<#@ import namespace="EnvDTE" #>
+<#@ import namespace="EnvDTE80" #>
+<#@ import namespace="Microsoft.VisualStudio.TextTemplating" #>
+<#@ output extension=".txt" #>
+
+<#
+settings=DurandalSettings.Load(Host);
+PrepareDataToRender(this);
+var manager = Manager.Create(Host, GenerationEnvironment);
+var returnTypes = new List<string>();
+
+
+// Get All API Controllers
+	//TODO: THIS NEEDS TO BE SPLIT OUT INTO TWO SEPERATE STEPS; 1) Build Model objects, 2) iterate over controllers to build data access methods.
+
+// for each controller in controllers
+	foreach(var ctrl in Controllers)
+    {
+#>
+<#= "/******************************************************************************************/" #>  
+<#= "//****** " + ctrl.Name #>
+<#= "/******************************************************************************************/" #>  
+<#
+	// for each controller method which returns a value
+		foreach(var fucntion in ctrl.GetFunctions())// i think this is returning methods too
+        {
+			var modelPath = Path.Combine(AppRoot, settings.AppFolder, settings.AppModelFolder);			
+			if(fucntion.ReturnTypeFullName != "System.Void" && !string.IsNullOrWhiteSpace(fucntion.ReturnTypeFullName))	
+            { 
+				if(!returnTypes.Contains(fucntion.ReturnTypeFullName)) // have we processed this model yet?
+				{
+					returnTypes.Add(fucntion.ReturnTypeFullName);		// first process, add it to the running model list
+#>
+
+<#= "/*************** RUN SUMMARY ***************/" #>  
+<#= "//***** Method Element FullName: " + fucntion.Element.FullName #>
+<#= "//***** Return Full Type: " + fucntion.ReturnTypeFullName #>
+<#= "//***** Return Type: " + fucntion.ReturnTypeClassName #>
+<#= "//Template path: " + Path.GetDirectoryName(Host.TemplateFile) #>
+<#= "//modelPath: " + modelPath #>
+<#= "//model class file name: " + fucntion.ReturnTypeClassName.ToLower() #>
+<#= "// Is skipped (generic): " + fucntion.IsGenericCollection #>
+<# 
+					if(fucntion.IsGenericCollection)
+						continue;
+
+					// Start new File
+					manager.StartNewFile(fucntion.ReturnTypeClassName.ToLower()  + ".js", Path.Combine(AppRoot, settings.AppFolder, settings.AppModelFolder));
+
+					var codeProperties = GetProperties(fucntion.ReturnType);
+					var init = new StringBuilder();
+					var update = new StringBuilder();
+
+					// for each return type property
+					foreach(var codeProperty in codeProperties)
+					{
+						var propName = StripNamespace(codeProperty.FullName);
+
+						// so we want a more clever way of doing the attribute analysis...
+						var attributes = codeProperty.Attributes.OfType<CodeAttribute2>();
+						
+						var observeAttr = attributes.FirstOrDefault(x => x.Name == "KoObservable");
+						var isKoObserve = observeAttr == null ? true : observeAttr.Value.Split(',').FirstOrDefault() == "true";
+
+						if(isKoObserve){
+							init.AppendFormat("this.{0} = ko.observable();", propName);
+							update.AppendFormat("self.{0}(data.{0});", propName);
+						}
+						else{
+							init.AppendFormat("this.{0} = '';", propName);
+							update.AppendFormat("self.{0} = data.{0};", propName);
+                        }
+						
+						init.Append("\n\t\t");
+						update.Append("\n\t\t\t");
+					
+					} // *end foreach codeProperties
+#>
+// *** Generated Code by T4Durandal: <#= DateTime.Now #>
+// *** Based on <#= fucntion.ReturnTypeFullName #>
+define(['knockout'], function (ko) {
+	return function (raw) {
+		var self = this;
+		<#= init.ToString() #>
+			
+		this.update = function(data) { 
+			<#= update.ToString() #>
+        };
+
+        self.update(raw);
+    };
+});
+<#	
+			}
+		}
+		manager.EndBlock();
+	}
+}
+
+manager.Process(true);
+#>			
+
+<#+
+
+static DTE Dte;
+static Project Project;
+static string AppRoot;
+static DurandalSettings settings;
+static TextTransformation TT;
+static string T4FileName;
+static string T4Folder;
+static List<ControllerInfo> Controllers;
+//static Dictionary<string, ResultTypeInfo> ResultTypes;
+
+void PrepareDataToRender(TextTransformation tt)
+{
+   TT = tt;
+   T4FileName = Path.GetFileName(Host.TemplateFile);
+   T4Folder = Path.GetDirectoryName(Host.TemplateFile);
+   Controllers = new List<ControllerInfo>();
+	
+   // Get the DTE service from the host
+   var serviceProvider = Host as IServiceProvider;
+   if (serviceProvider != null)
+   {
+       Dte = (EnvDTE.DTE)serviceProvider.GetService(typeof(EnvDTE.DTE));
+   }
+
+   // Fail if we couldn't get the DTE. This can happen when trying to run in TextTransform.exe
+   if (Dte == null)
+   {
+       throw new Exception("T4Durandal can only execute through the Visual Studio host");
+   }
+
+   Project = GetProjectContainingT4File(Dte);
+
+   if (Project == null)
+   {
+       Error("Could not find the VS Project containing the T4 file.");
+       return;
+   }
+
+   // Get the path of the root folder of the app
+   AppRoot = Path.GetDirectoryName(Project.FullName) + '\\';
+
+   LoadApiControllers(Project);
+}
+
+#region codez
+
+public Project GetProjectContainingT4File(DTE dte)
+{
+
+   // Find the .tt file's ProjectItem
+   ProjectItem projectItem = dte.Solution.FindProjectItem(Host.TemplateFile);
+
+   // If the .tt file is not opened, open it
+   if (projectItem.Document == null)
+       projectItem.Open(EnvDTE.Constants.vsViewKindCode);
+
+   return projectItem.ContainingProject;
+}
+
+public void LoadApiControllers(Project proj)
+{			
+	var classes = GetCodeClassesInProject(proj.ProjectItems);
+	
+    for(int i = 0; i < classes.Count; i++)
+    {	
+		CodeClass2 cls = classes[i];
+		if(HasBaseClass(cls.Bases, "ApiController"))
+        {		
+			
+			var elements = GetActionsForController(cls);
+
+			var controller = new ControllerInfo {
+				Name =	cls.FullName, // we may want to change this to cls.ProjectItem or just the CodeClass
+				Methods = new List<ControllerMethod>()
+            };
+
+			// write URLs
+            foreach (var action in elements)
+            {
+				controller.Methods.Add(new ControllerMethod { Element = action });				
+            }
+			
+
+			// keeping this for reference (short term)
+			//var getActions = actions.Where( a => HasAttribute(a.Attributes, "HttpGet"));
+			//var postActions = actions.Where(a => HasAttribute(a.Attributes, "HttpPost"));
+			
+			//if(getActions.Any())
+			//	Write(",\r\n");
+		
+			Controllers.Add(controller);	
+		}
+    }
+}
+
+public List<CodeClass2> GetCodeClassesInProject(ProjectItems items)
+{
+	//TODO: make this more specific, we know we only what ApiControllers here, so why get all?
+	var classes = new List<CodeClass2>();
+    for (int i=1; i <= items.Count; i++)
+    {			
+		ProjectItem item = items.Item(i);
+		if(item.ProjectItems != null && item.ProjectItems.Count > 0 )
+        {
+			classes.AddRange(GetCodeClassesInProject(item.ProjectItems));
+        }
+
+		if(item.FileCodeModel != null)
+        {
+			classes.AddRange(GetClassesInCodeModel(item.FileCodeModel.CodeElements));
+		}
+    }
+	return classes;
+}
+
+public List<CodeClass2> GetClassesInCodeModel(CodeElements elements)
+{
+	var classes = new List<CodeClass2>();
+
+    for(int i = 1; i <= elements.Count; i++)
+    {
+		CodeElement element = elements.Item(i);
+		if(element.Kind == vsCMElement.vsCMElementClass)
+        {
+			classes.Add(element as CodeClass2);
+		} 
+
+		var members = GetCodeElementMembers(element);
+		if(members != null)
+        {
+			classes.AddRange(GetClassesInCodeModel(members));
+		}
+    }
+
+	return classes;
+}
+
+public EnvDTE.CodeElements GetCodeElementMembers(CodeElement elem)
+{
+    EnvDTE.CodeElements elements = null;
+
+    if (elem is CodeNamespace)
+    {
+        elements = (elem as CodeNamespace).Members;
+    }
+    else if (elem is CodeType)
+    {
+        elements = (elem as CodeType).Members;
+    }
+    else if (elem is CodeFunction)
+    {
+        elements = (elem as CodeFunction).Parameters;
+    }
+
+    return elements;
+}
+
+public List<CodeElement2> GetActionsForController(CodeClass2 controller)
+{
+	var elements = new List<CodeElement2>();
+    for (int i = 1; i <= controller.Members.Count; i++)
+    {			  
+		// we may filter on an attribute here (really don't want anything in api controllers other than endpoints)
+		elements.Add(controller.Members.Item(i) as CodeElement2);        
+    }
+	return elements;
+}
+
+public bool HasBaseClass(CodeElements bases, string baseClass)
+{
+	var allBases = GetBaseClasses(bases);
+    foreach (var bs in allBases)
+    {
+		if(bs.Name == baseClass)
+			return true;
+    }
+	return false;
+}
+
+public bool HasAttribute(CodeElements attributes, string attr)
+{
+    for (int i = 1; i <= attributes.Count; i++)
+    {
+		var attrElem = attributes.Item(i);
+		if(attrElem.Name == attr)
+        {
+			return true;
+        }
+	}
+	return false;
+}
+
+public List<CodeElement> GetBaseClasses(CodeElements bases)
+{
+	var allBases = new List<CodeElement>();
+	if(bases.Count >0)
+    {
+        for (int i = 1; i <= bases.Count; i++)
+        {
+			var bs = bases.Item(i);
+			allBases.Add(bs);
+			if(bs is CodeClass)
+            {
+				allBases.AddRange(GetBaseClasses((bs as CodeClass).Bases));
+			}
+        }
+	}
+	return allBases;
+}
+
+/****************************************************
+	Find an attribute of a given type on an attribute collection
+****************************************************/
+static CodeAttribute2 GetAttribute(CodeElements attributes, string attributeType)
+{
+   for (int i = 1; i <= attributes.Count; i++)
+   {
+       try
+       {
+           var attrib = (CodeAttribute2)attributes.Item(i);
+           if (attributeType.Split(',').Contains(attrib.FullName, StringComparer.OrdinalIgnoreCase))
+           {
+               return attrib;
+           }
+       }
+       catch
+       {
+           // FullName can throw in some cases, so just ignore those attributes
+           continue;
+       }
+   }
+   return null;
+}
+
+static CodeAttribute2 GetAttribute(CodeClass2 type, string attributeType)
+{
+   while(type != null) {
+       var attribute = GetAttribute(type.Attributes, attributeType);
+       if(attribute != null)
+           return attribute;
+       if (type.Bases.Count == 0)
+           return null;
+       type = (CodeClass2)type.Bases.Item(1);
+   }
+   return null;
+}
+
+
+/****************************************************
+	Get Properties for a class
+****************************************************/
+private void FindProperties(CodeElements elements, IList<CodeProperty> properties)
+{
+  foreach (CodeElement element in elements)
+  {
+    CodeProperty property = element as CodeProperty;
+    if (property != null)
+    {
+      properties.Add(property);
+    } 
+    FindProperties(element.Children, properties);
+  }
+}
+
+public IEnumerable<CodeProperty> GetProperties(CodeClass codeClass)
+{
+    if (codeClass == null) 
+       return new List<CodeProperty>();// throw new Exception("No Data fool!");
+
+    var baseProperties = GetProperties(codeClass.Bases.Cast<CodeClass>().FirstOrDefault());
+
+    return baseProperties.Concat(codeClass
+        .Members
+        .Cast<CodeElement>()
+        .Where(ce => ce.Kind == vsCMElement.vsCMElementProperty)
+        .Cast<CodeProperty>()
+        .Where(p => p.Access == vsCMAccess.vsCMAccessPublic));
+}
+
+public string StripNamespace(string ns)
+{
+	if(ns.IndexOf('.') < 0)
+		return ns;
+
+	var items = ns.Split('.');
+	return items[items.Length - 1];
+}
+
+#endregion
+
+/***************************************************************************************************************
+	The following are our data objects for working with the controlers, methods, and method attributes
+***************************************************************************************************************/
+public class ControllerInfo
+{
+    public string Name { get; set; }
+	public List<ControllerMethod> Methods {get;set;} // MethodInfo?
+	
+	public IEnumerable<ControllerMethod> GetFunctions()
+    {
+		return Methods.Where(f => ((CodeFunction2)f.Element).FunctionKind == vsCMFunction.vsCMFunctionFunction);
+    }
+}
+
+public class ControllerMethod
+{
+	public CodeElement2 Element { get; set; }
+
+	public List<CodeAttribute2> Attributes
+    {
+		get 
+        {
+			//if(Element == null || ((CodeClass2)Element).Attributes == null)
+				return new List<CodeAttribute2>();
+			
+			//var elem = Element as CodeClass2;
+			//return elem.Attributes;
+        }
+    }
+	public CodeClass2 ReturnType
+    {
+		get 
+        {
+			return ((CodeFunction2)Element).Type.CodeType as CodeClass2;
+        }
+    }
+	
+	public string ReturnTypeFullName
+    {
+		get 
+		{
+			if(Element == null)
+				return "null";
+			return ((CodeFunction2)Element).Type.AsFullName;//.CodeType.FullName;
+        }
+    }
+
+	public string ReturnTypeClassName
+    {
+		get
+		{
+			if(ReturnTypeFullName.IndexOf('<') > -1)
+            {
+				return StripNamespace(ReturnTypeFullName.Split('<', '>')[1]);					
+            }
+			else
+			{
+				return StripNamespace(ReturnTypeFullName);
+            }			
+        }
+    }
+
+	public bool IsGenericCollection
+    {
+		get
+        {
+			return ReturnTypeFullName.IndexOf('<') > -1; // there is a better way to do this... built in.
+        }
+    }
+	
+	private string StripNamespace(string ns)
+	{
+		if(ns.IndexOf('.') < 0)
+			return string.Empty;
+
+		var items = ns.Split('.');
+		return items[items.Length - 1];
+	}
+} 
+
+//http://programmerdave.com/getting-attribute-data-inside-a-t4/
+public class ReturnType
+{
+    public CodeClass2 ObjectCodeClass { get; set; }
+	
+    public string Name { get; set; }
+
+    public bool IsCollection { get; set; }
+
+	public IEnumerable<ReturnTypeProperty> Properties {get;set;}
+
+}
+public class ReturnTypeProperty {
+	
+    public string Name { get; set; }
+    public IEnumerable<ReturnTypePropertyAttribute> Attributes { get; set; }
+
+}
+public class ReturnTypePropertyAttribute {
+
+    public string Name { get; set; }
+
+}
+
+
+/***************************************************************************************************************
+	Settings for processing, this prevents us from having to touch the T4 template for 
+	simple configurable properties (stole from t4MVC)
+***************************************************************************************************************/
+class DurandalSettings : XmlSettings
+{
+   public static DurandalSettings Load(ITextTemplatingEngineHost host)
+   {
+       return Load<DurandalSettings>(host);
+   }
+
+   public DurandalSettings()
+   {   
+		this.ReferencedNamespaces =  new XmlStringArray(new string[] { }, "Namespace");
+		this.AreasFolder = "Areas";
+		this.AppFolder = "App";
+		this.AppModelFolder = "models";
+		this.AppServiceFolder = "services";
+		this.CreateOneDataServicePerController = false;
+		this.ControllersFolder = "Controllers";
+		this.AppModelSuffix = "Model";
+		this.UseLowercaseRoutes = false;
+		this.AttributeIndicatingHttps = "System.Web.Mvc.RequireHttpsAttribute";
+	}
+
+	[System.ComponentModel.Description("Namespaces to be referenced by the generated code")]
+	public XmlStringArray ReferencedNamespaces { get; set; }
+	[System.ComponentModel.Description("The folder under the project that contains the areas")]
+	public string AreasFolder { get; set; }
+	[System.ComponentModel.Description("The folder where the Durandal app lives")]
+	public string AppFolder { get; set; }
+	[System.ComponentModel.Description("The folder where the Durandal models live")]
+	public string AppModelFolder { get; set; }
+	[System.ComponentModel.Description("The folder where the Durandal service files live")]
+	public string AppServiceFolder { get; set; }
+	[System.ComponentModel.Description("Choose whether you want to create a data access specific js service file per api controller")]
+	public bool CreateOneDataServicePerController { get; set; }
+	[System.ComponentModel.Description("The folder under the project that contains the controllers")]
+	public string ControllersFolder { get; set; }
+	[System.ComponentModel.Description("The suffix for the generated Durandal models")]
+	public string AppModelSuffix { get; set; }
+	[System.ComponentModel.Description("If true, use lower case tokens in routes for the area, controller and action names")]
+	public bool UseLowercaseRoutes { get; set; }
+	[System.ComponentModel.Description("When creating links with T4MVC, it can force them to HTTPS if the action method you are linking to requires Http.")]
+	public string AttributeIndicatingHttps { get; set; }
+}
+
+/*
+   XmlSettings base classes, if you need to modify the T4MVC properties edit the DurandalSettings Class Above
+*/
+/// Base XmlSettings class, responsible for reading/writing the settigns file contents, all settings other 
+/// than string convertable types should decend from this class
+abstract class XmlSettingsBase
+{
+   protected XmlSettingsBase()
+   {
+       this.NeedsSave = true;
+   }
+
+   protected virtual void Init()
+   {
+   }
+
+   protected bool SaveAsChild { get; private set; }
+
+   protected bool NeedsSave { get; private set; }
+
+   protected static void SetSaveAsChild(XmlSettingsBase settings, bool value)
+   {
+       settings.SaveAsChild = value;
+   }
+
+   protected static void SetNeedsSave(XmlSettingsBase settings, bool value)
+   {
+       settings.NeedsSave = value;
+   }
+
+   protected static void WriteCommentedProperty(System.Xml.XmlWriter writer, string name)
+   {
+       writer.WriteComment(string.Concat("<", name, "></", name, ">"));
+   }
+
+   protected static void WritePropertyDesc(System.Xml.XmlWriter writer, System.ComponentModel.PropertyDescriptor property)
+   {
+       var desc = property.Attributes.OfType<System.ComponentModel.DescriptionAttribute>().FirstOrDefault();
+       if(desc != null)
+       {
+           writer.WriteComment(desc.Description);
+       }
+   }
+
+   protected virtual void Load(System.Xml.Linq.XElement xml)
+   {
+       this.NeedsSave = false;
+       int matched = 0;
+       int read = 0;
+       foreach(System.ComponentModel.PropertyDescriptor property in System.ComponentModel.TypeDescriptor.GetProperties(this))
+       {
+           object pvalue;
+           if(typeof(XmlSettingsBase).IsAssignableFrom(property.PropertyType) || (((pvalue = property.GetValue(this)) != null) && typeof(XmlSettingsBase).IsAssignableFrom(pvalue.GetType())))
+           {
+               read++;
+               var value = xml.Element(property.Name);
+               if(value != null)
+               {
+                   var settings = (XmlSettingsBase)property.GetValue(this);
+                   settings.Load(value);
+                   if(!settings.NeedsSave)
+                       matched++;
+                   settings.SaveAsChild = true;
+               }
+           }
+           else if(!property.IsReadOnly)
+           {
+               read++;
+               var value = xml.Element(property.Name);
+               if(value != null)
+               {
+                   if(property.Converter.CanConvertFrom(typeof(string)))
+                   {
+                       matched++;
+                       property.SetValue(this, property.Converter.ConvertFromString(value.Value));
+                   }
+                   else
+                   {
+                       System.Reflection.MethodBase parser = property.PropertyType.GetMethod("Parse", new Type[] { typeof(string) });
+                       if(parser == null)
+                           parser = property.PropertyType.GetConstructor(new Type[] { typeof(string) });
+
+                       if(parser != null)
+                       {
+                           matched++;
+                           property.SetValue(this, parser.Invoke(null, new Object[] { value.Value }));
+                       }
+                   }
+               }
+           }
+       }
+       this.NeedsSave = this.NeedsSave || (matched < read);
+   }
+
+   protected virtual void Save(System.Xml.XmlWriter writer)
+   {
+       foreach(System.ComponentModel.PropertyDescriptor property in System.ComponentModel.TypeDescriptor.GetProperties(this))
+       {
+           var value = property.GetValue(this);
+           WritePropertyDesc(writer, property);
+           if(value != null)
+           {
+               if(typeof(XmlSettingsBase).IsAssignableFrom(value.GetType()))
+               {
+                   var settings = (XmlSettingsBase)property.GetValue(this);
+                   if((settings != null) && settings.SaveAsChild)
+                   {
+                       writer.WriteStartElement(property.Name);
+                       settings.Save(writer);
+                       writer.WriteEndElement();
+                   }
+               } else if(!property.IsReadOnly)
+               {
+                   writer.WriteElementString(property.Name, property.Converter.ConvertToString(value));
+               }
+           }
+           else
+           {
+               WriteCommentedProperty(writer, property.Name);
+           }
+       }
+   }
+}
+
+/// Custom class to allow string arrays to be read and written to/from settings
+class XmlStringArray : XmlSettingsBase, IEnumerable<string>
+{
+   public XmlStringArray(IEnumerable<string> items, string name)
+   {
+       this._items = items;
+       this._name = name;
+       SetSaveAsChild(this, true);
+   }
+
+   string _name;
+   IEnumerable<string> _items;
+
+   protected override void Load(System.Xml.Linq.XElement xml)
+   {
+       var items = new List<string>();
+       foreach(var item in xml.Elements(this._name))
+       {
+           items.Add(item.Value);
+       }
+       this._items = items;
+       SetNeedsSave(this, false);
+   }
+
+   protected override void Save(System.Xml.XmlWriter writer)
+   {
+       if(this._items == null || !this._items.Any())
+       {
+           WriteCommentedProperty(writer, this._name);
+           return;
+       }
+
+       foreach(var item in this._items)
+       {
+           writer.WriteElementString(this._name, item);
+       }
+   }
+
+   public IEnumerator<string> GetEnumerator()
+   {
+       return this._items.GetEnumerator();
+   }
+
+   System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator()
+   {
+       return this.GetEnumerator();
+   }
+}
+
+/// This is the base class for the standard settings, the main settigns class should inherit from this
+/// one since it provides the methods to interact with the T4 system and EnvDTE. Sub-properties can
+/// just inherit from XmlSettingsBase.
+abstract class XmlSettings : XmlSettingsBase
+{
+   protected static T Load<T>(ITextTemplatingEngineHost host) where T : XmlSettings, new()
+   {
+       T settings = new T();
+       settings.Init(host);
+       return settings;
+   }
+
+   void Init(ITextTemplatingEngineHost host)
+   {
+
+       this.TemplateFile = Path.GetFileName(host.TemplateFile);
+       this.TemplateFolder = Path.GetDirectoryName(host.TemplateFile);
+
+       // Get the DTE service from the host
+       var serviceProvider = host as IServiceProvider;
+       if (serviceProvider != null)
+       {
+           this.DTE = (EnvDTE.DTE)serviceProvider.GetService(typeof(EnvDTE.DTE));
+       }
+
+       // Fail if we couldn't get the DTE. This can happen when trying to run in TextTransform.exe
+       if (this.DTE == null)
+       {
+           throw new Exception("T4Build can only execute through the Visual Studio host");
+       }
+
+       this.ProjectItem = this.DTE.Solution.FindProjectItem(host.TemplateFile);
+
+       // If the .tt file is not opened, open it
+       if (this.ProjectItem.Document == null)
+           this.ProjectItem.Open(EnvDTE.Constants.vsViewKindCode);
+
+       this.Project = this.ProjectItem.ContainingProject;
+
+       if (Project == null)
+       {
+           throw new Exception("Could not find the VS Project containing the T4 file.");
+       }
+
+       this.Load();
+       this.Init();
+   }
+
+   public string TemplateFile { get; private set; }
+
+   public string TemplateFolder { get; private set; }
+
+   public DTE DTE { get; private set; }
+
+   public ProjectItem ProjectItem { get; private set; }
+
+   public Project Project { get; private set; }
+
+   ProjectItem FindProjectItemRecursive(ProjectItems items, string name)
+   {
+       if(items == null)
+           return null;
+
+       foreach(ProjectItem item in items)
+       {
+           if(item.Name.Equals(name) || item.Name.StartsWith(name + "."))
+               return item;
+           var found = FindProjectItemRecursive(item.ProjectItems, name);
+           if(found != null)
+               return found;
+       }
+
+       return null;
+   }
+
+   protected ProjectItem FindProjectItem(string name)
+   {
+       return this.FindProjectItemRecursive(this.Project.ProjectItems, name);
+   }
+
+   protected string SettingsFile
+   {
+       get
+       {
+           return Path.Combine(this.TemplateFolder, string.Concat(this.TemplateFile, ".settings.xml"));
+       }
+   }
+
+   void Load()
+   {
+       if(System.IO.File.Exists(this.SettingsFile))
+           try
+           {
+               this.Load(System.Xml.Linq.XElement.Load(this.SettingsFile));
+           } catch { throw; }
+   }
+
+   public void SaveChanges(Manager manager)
+   {
+       // Avoid saving if we dont need to;
+       if(!this.NeedsSave)
+           return;
+
+       if(manager.FileOkToWrite(this.SettingsFile))
+       {
+           var settings = new System.Xml.XmlWriterSettings
+           {
+               Indent = true
+           };
+           using(var writer = System.Xml.XmlWriter.Create(this.SettingsFile, settings))
+           {
+               writer.WriteStartDocument();
+               writer.WriteStartElement(this.GetType().Name);
+               this.Save(writer);
+               writer.WriteEndElement();
+               writer.WriteEndDocument();
+           }
+
+           var item = this.ProjectItem.Collection.AddFromFile(this.SettingsFile);
+           item.Properties.Item("ItemType").Value = "None";
+       } else
+           TT.Error("Cannot save settings file! " + this.SettingsFile);
+   }
+}
+/**************************************************************************************************************/
+
+
+/**************************************************************************************************************
+   Manager.tt from Damien Guard: http://damieng.com/blog/2009/11/06/multiple-outputs-from-t4-made-easy-revisited
+**************************************************************************************************************/
+// Manager class records the various blocks so it can split them up
+class Manager
+{
+   private class Block
+   {
+       public string Name;
+       public int Start, Length;
+	   public string FilePath;
+   }
+
+   private Block currentBlock;
+   private List<Block> files = new List<Block>();
+   private Block footer = new Block();
+   private Block header = new Block();
+   private ITextTemplatingEngineHost host;
+   private StringBuilder template;
+   protected List<string> generatedFileNames = new List<string>();
+
+   public static Manager Create(ITextTemplatingEngineHost host, StringBuilder template)
+   {
+       return (host is IServiceProvider) ? new VSManager(host, template) : new Manager(host, template);
+   }
+
+   public virtual bool FileOkToWrite(string fileName)
+   {
+       return true;
+   }
+
+   public void KeepGeneratedFile(string name)
+   {
+       name = Path.Combine(Path.GetDirectoryName(host.TemplateFile), name);
+       generatedFileNames.Add(name);
+   }
+   
+   public void StartNewFile(string name, string filePath = "")
+   {
+       if (name == null)
+           throw new ArgumentNullException("name");
+       CurrentBlock = new Block { Name = name, FilePath = filePath };
+   }
+
+   public void StartFooter()
+   {
+       CurrentBlock = footer;
+   }
+
+   public void StartHeader()
+   {
+       CurrentBlock = header;
+   }
+
+   public void EndBlock()
+   {
+       if (CurrentBlock == null)
+           return;
+       CurrentBlock.Length = template.Length - CurrentBlock.Start;
+       if (CurrentBlock != header && CurrentBlock != footer)
+           files.Add(CurrentBlock);
+       currentBlock = null;
+   }
+
+   public virtual void Process(bool split)
+   {
+       if (split)
+       {
+           EndBlock();
+           string headerText = template.ToString(header.Start, header.Length);
+           string footerText = template.ToString(footer.Start, footer.Length);
+           string outputPath = Path.GetDirectoryName(host.TemplateFile);
+		   
+           files.Reverse();
+           foreach (Block block in files)
+           {
+			   var path = outputPath;
+			   if(!string.IsNullOrWhiteSpace(block.FilePath))
+               {
+				   path = block.FilePath;
+               }
+               string fileName = Path.Combine(path, block.Name);
+               string content = headerText + template.ToString(block.Start, block.Length) + footerText;
+               generatedFileNames.Add(fileName);
+               CreateFile(fileName, content);
+               template.Remove(block.Start, block.Length);
+           }
+       }
+   }
+
+   protected virtual void CreateFile(string fileName, string content)
+   {
+       if (IsFileContentDifferent(fileName, content))
+           File.WriteAllText(fileName, content);
+   }
+
+   public virtual string GetCustomToolNamespace(string fileName)
+   {
+       return null;
+   }
+
+   public virtual string DefaultProjectNamespace
+   {
+       get { return null; }
+   }
+
+   protected bool IsFileContentDifferent(string fileName, string newContent)
+   {
+       return !(File.Exists(fileName) && File.ReadAllText(fileName) == newContent);
+   }
+
+   private Manager(ITextTemplatingEngineHost host, StringBuilder template)
+   {
+       this.host = host;
+       this.template = template;
+   }
+
+   private Block CurrentBlock
+   {
+       get { return currentBlock; }
+       set
+       {
+           if (CurrentBlock != null)
+               EndBlock();
+           if (value != null)
+               value.Start = template.Length;
+           currentBlock = value;
+       }
+   }
+
+   private class VSManager : Manager
+   {
+       private EnvDTE.ProjectItem templateProjectItem;
+       private EnvDTE.DTE dte;
+       private Action<string> checkOutAction;
+       private Action<IEnumerable<string>> projectSyncAction;
+       private IVsQueryEditQuerySave2 queryEditSave;
+
+       public override string DefaultProjectNamespace
+       {
+           get
+           {
+               return templateProjectItem.ContainingProject.Properties.Item("DefaultNamespace").Value.ToString();
+           }
+       }
+
+       public override string GetCustomToolNamespace(string fileName)
+       {
+           return dte.Solution.FindProjectItem(fileName).Properties.Item("CustomToolNamespace").Value.ToString();
+       }
+
+       public override void Process(bool split)
+       {
+           if (templateProjectItem.ProjectItems == null)
+               return;
+           base.Process(split);
+           projectSyncAction.EndInvoke(projectSyncAction.BeginInvoke(generatedFileNames, null, null));
+       }
+
+       public override bool FileOkToWrite(string fileName)
+       {
+           CheckoutFileIfRequired(fileName);
+           return base.FileOkToWrite(fileName);
+       }
+
+       protected override void CreateFile(string fileName, string content)
+       {
+           if (IsFileContentDifferent(fileName, content))
+           {
+               CheckoutFileIfRequired(fileName);
+               File.WriteAllText(fileName, content);
+           }
+       }
+
+       internal VSManager(ITextTemplatingEngineHost host, StringBuilder template)
+           : base(host, template)
+       {
+           var hostServiceProvider = (IServiceProvider)host;
+           if (hostServiceProvider == null)
+               throw new ArgumentNullException("Could not obtain IServiceProvider");
+
+           dte = (EnvDTE.DTE)hostServiceProvider.GetService(typeof(EnvDTE.DTE));
+           if (dte == null)
+               throw new ArgumentNullException("Could not obtain DTE from host");
+
+           templateProjectItem = dte.Solution.FindProjectItem(host.TemplateFile);
+           checkOutAction = (string fileName) => dte.SourceControl.CheckOutItem(fileName);
+           projectSyncAction = (IEnumerable<string> keepFileNames) => ProjectSync(templateProjectItem, keepFileNames);
+           queryEditSave = (IVsQueryEditQuerySave2)hostServiceProvider.GetService(typeof(SVsQueryEditQuerySave));
+       }
+
+       private static void ProjectSync(EnvDTE.ProjectItem templateProjectItem, IEnumerable<string> keepFileNames)
+       {
+           var keepFileNameSet = new HashSet<string>(keepFileNames);
+           var projectFiles = new Dictionary<string, EnvDTE.ProjectItem>();
+           var originalFilePrefix = Path.GetFileNameWithoutExtension(templateProjectItem.get_FileNames(0)) + ".";
+           foreach (EnvDTE.ProjectItem projectItem in templateProjectItem.ProjectItems)
+               projectFiles.Add(projectItem.get_FileNames(0), projectItem);
+
+           // Remove unused items from the project
+           foreach (var pair in projectFiles)
+               if (!keepFileNames.Contains(pair.Key) && !(Path.GetFileNameWithoutExtension(pair.Key) + ".").StartsWith(originalFilePrefix))
+                   pair.Value.Delete();
+
+           // Add missing files to the project
+           foreach (string fileName in keepFileNameSet)
+               if (!projectFiles.ContainsKey(fileName))
+                   templateProjectItem.ProjectItems.AddFromFile(fileName);
+       }
+
+       private void CheckoutFileIfRequired(string fileName)
+       {
+           if (queryEditSave != null)
+           {
+               uint pfEditVerdict;
+               queryEditSave.QuerySaveFile(fileName, 0, null, out pfEditVerdict);
+           }
+           else
+           {
+               var sc = dte.SourceControl;
+               if (sc != null && sc.IsItemUnderSCC(fileName) && !sc.IsItemCheckedOut(fileName)) 
+                   checkOutAction.EndInvoke(checkOutAction.BeginInvoke(fileName, null, null));
+           }
+       }
+   }
+}
+
+/*
+   End of Manager.tt
+*/
+
+#>

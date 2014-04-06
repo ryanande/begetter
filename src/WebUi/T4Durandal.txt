@@ -1,0 +1,33 @@
+﻿
+/******************************************************************************************/  
+//****** WebUi.Controllers.CustomerController
+/******************************************************************************************/  
+
+/*************** RUN SUMMARY ***************/  
+//***** Method Element FullName: WebUi.Controllers.CustomerController.Get
+//***** Return Full Type: System.Collections.Generic.IEnumerable<WebUi.Models.Customer>
+//***** Return Type: Customer
+//Template path: C:\projects\begetter\src\WebUi
+//modelPath: C:\projects\begetter\src\WebUi\App\models
+//model class file name: customer
+// Is skipped (generic): True
+
+/*************** RUN SUMMARY ***************/  
+//***** Method Element FullName: WebUi.Controllers.CustomerController.Get
+//***** Return Full Type: WebUi.Models.Customer
+//***** Return Type: Customer
+//Template path: C:\projects\begetter\src\WebUi
+//modelPath: C:\projects\begetter\src\WebUi\App\models
+//model class file name: customer
+// Is skipped (generic): False
+
+/*************** RUN SUMMARY ***************/  
+//***** Method Element FullName: WebUi.Controllers.CustomerController.Post
+//***** Return Full Type: System.Net.Http.HttpResponseMessage
+//***** Return Type: HttpResponseMessage
+//Template path: C:\projects\begetter\src\WebUi
+//modelPath: C:\projects\begetter\src\WebUi\App\models
+//model class file name: httpresponsemessage
+// Is skipped (generic): False
+			
+

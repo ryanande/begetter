@@ -1,0 +1,24 @@
+﻿<?xml version="1.0" encoding="utf-8" ?>
+<MvcSettings>
+  <!--Namespaces to be referenced by the generated code-->
+  <ReferencedNamespaces>
+    <!--<Namespace></Namespace>-->
+  </ReferencedNamespaces>
+  <!--The folder under the project that contains the areas-->
+  <AreasFolder>Areas</AreasFolder>
+
+  <!--The folder under the project that contains the controllers-->
+  <ControllersFolder>Controllers</ControllersFolder>
+  <ModelsFolder>Models</ModelsFolder>
+
+  <AppFolder>App</AppFolder>
+  <AppModelFolder>models</AppModelFolder>
+  <AppServiceFolder>services</AppServiceFolder>
+
+  <AppModelSuffix>Model</AppModelSuffix>
+
+  <CreateOneDataServicePerController>false</CreateOneDataServicePerController>
+
+
+  <AttributeIndicatingHttps>System.Web.Mvc.RequireHttpsAttribute</AttributeIndicatingHttps>
+</MvcSettings>
